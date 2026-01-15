@@ -1,126 +1,122 @@
-# weather_checker_spc.py
-from datetime import datetime, timedelta
-import numpy as np
+import requests
 import pandas as pd
-import herbie
-from nicegui import ui
+import numpy as np
+from datetime import datetime, timedelta
 
-# ----------------------
-# 1. HRRR Data Fetch
-# ----------------------
-def fetch_hrrr(lat=39.29, lon=-76.61):
-    """Fetch HRRR 13 km grib data for location"""
-    try:
-        hrrr_data = herbie.grib('HRRR:13:0')  # surface + upper levels
-        data = hrrr_data.get(lat=lat, lon=lon, variables=[
-            'CAPE', 'CIN', 'U700', 'V700', 'U300', 'V300', 'U10', 'V10'
-        ])
-        return data
-    except Exception as e:
-        print(f'ERROR fetching HRRR: {e}')
-        return None
+# ---------- CONFIG ----------
+LAT = 39.29      # example: Baltimore, MD
+LON = -76.61
+FORECAST_HOURS = 24
 
-# ----------------------
-# 2. Derived Parameters
-# ----------------------
-def calculate_shear(data):
-    """Compute 0-3 km and 0-6 km shear (kt)"""
-    u10, v10 = data['U10'], data['V10']
-    u700, v700 = data['U700'], data['V700']
-    u300, v300 = data['U300'], data['V300']
+# ---------- FETCH WEATHER ----------
+def fetch_weather():
+    url = (
+        f"https://api.open-meteo.com/v1/forecast?"
+        f"latitude={LAT}&longitude={LON}&hourly=cape,cin,"
+        f"wind_speed_10m,wind_direction_10m,"
+        f"wind_speed_700hPa,wind_direction_700hPa,"
+        f"wind_speed_500hPa,wind_direction_500hPa,"
+        f"wind_speed_300hPa,wind_direction_300hPa,"
+        f"precipitation&forecast_days=2&timezone=America/New_York"
+    )
+    resp = requests.get(url)
+    resp.raise_for_status()
+    return resp.json()["hourly"]
 
-    shear03 = np.sqrt((u700-u10)**2 + (v700-v10)**2) * 1.94384  # m/s -> kt
-    shear06 = np.sqrt((u300-u10)**2 + (v300-v10)**2) * 1.94384
+# ---------- CALCULATE SHEAR ----------
+def vector_shear(u1, v1, u2, v2):
+    """Compute shear magnitude between two levels"""
+    du = u2 - u1
+    dv = v2 - v1
+    return np.sqrt(du**2 + dv**2)
 
-    return shear03, shear06
+def calc_shear(data):
+    shear_03km = []
+    shear_06km = []
+    for i in range(min(FORECAST_HOURS, len(data["time"]))):
+        # Convert wind speed/direction to u/v components
+        def uv(ws, wd):
+            wd_rad = np.radians(wd)
+            u = -ws * np.sin(wd_rad)
+            v = -ws * np.cos(wd_rad)
+            return u, v
+        
+        u10, v10 = uv(data["wind_speed_10m"][i], data["wind_direction_10m"][i])
+        u700, v700 = uv(data["wind_speed_700hPa"][i], data["wind_direction_700hPa"][i])
+        u500, v500 = uv(data["wind_speed_500hPa"][i], data["wind_direction_500hPa"][i])
+        u300, v300 = uv(data["wind_speed_300hPa"][i], data["wind_direction_300hPa"][i])
 
-def calculate_srh_ehi_stp(data):
-    """Simplified proxies for helicity, EHI, STP"""
-    cape = data['CAPE']
-    shear03, shear06 = calculate_shear(data)
-    srh03 = shear03 * 1.2  # simple SRH proxy
-    ehi = (cape/1000) * (srh03/100)
-    stp = (cape/1000) * (shear03/50) * (srh03/100)
-    return srh03, ehi, stp
+        shear_03km.append(vector_shear(u10, v10, u700, v700))
+        shear_06km.append(vector_shear(u10, v10, u300, v300))
+    return shear_03km, shear_06km
 
-# ----------------------
-# 3. Hourly Risk Evaluation
-# ----------------------
-def evaluate_risk(data):
-    cape = data['CAPE']
-    shear03, shear06 = calculate_shear(data)
-    srh, ehi, stp = calculate_srh_ehi_stp(data)
-    precip = data.get('PRECIP', np.zeros_like(cape))
+# ---------- CALCULATE RISK ----------
+def calculate_risk(data):
+    risk_scores = []
+    fail_modes_list = []
 
-    risk_level = []
-    fail_modes = []
+    shear_03km, shear_06km = calc_shear(data)
 
-    for i in range(len(cape)):
+    for i in range(min(FORECAST_HOURS, len(data["time"]))):
         score = 0
-        fail = []
+        fail_modes = []
 
-        if cape[i] >= 1000: score += 2
-        elif cape[i] >= 500: fail.append('Marginal CAPE')
+        cape = data["cape"][i]
+        prec = data["precipitation"][i]
 
-        if shear03[i] >= 25: score += 1
-        elif shear03[i] >= 20: fail.append('Weak 0-3 km Shear')
+        # CAPE
+        if cape >= 1000: score += 2
+        if cape >= 2500: score += 2
+        if cape < 500: fail_modes.append("Low CAPE")
 
-        if shear06[i] >= 50: score += 1
-        elif shear06[i] >= 40: fail.append('Weak Deep-Layer Shear')
+        # Shear
+        s03 = shear_03km[i]
+        s06 = shear_06km[i]
+        if s03 >= 25: score += 2
+        if s06 >= 50: score += 2
+        if s03 < 20: fail_modes.append("Weak 0–3 km Shear")
+        if s06 < 40: fail_modes.append("Weak Deep-Layer Shear")
 
-        if srh[i] >= 150: score += 2
-        elif srh[i] >= 100: fail.append('Marginal SRH')
+        # Precipitation (proxy for moist environment)
+        if prec >= 2.0: score += 1
 
-        if ehi[i] >= 1: score += 1
-        if stp[i] >= 1: score += 1
+        # Determine Risk Level
+        if score <= 2: risk = "Low"
+        elif score <= 4: risk = "Marginal"
+        elif score <= 6: risk = "Moderate"
+        else: risk = "High"
 
-        # Risk mapping
-        if score >= 6: level = 'High'
-        elif score >= 4: level = 'Moderate'
-        elif score >= 2: level = 'Slight'
-        elif score >= 1: level = 'Marginal'
-        else: level = 'Low'
+        risk_scores.append({
+            "time": data["time"][i],
+            "CAPE": cape,
+            "Shear 0–3 km": round(s03,1),
+            "Shear 0–6 km": round(s06,1),
+            "Precip": prec,
+            "Score": score,
+            "Risk": risk,
+            "Fail Modes": ", ".join(fail_modes) if fail_modes else "None"
+        })
+    return risk_scores
 
-        risk_level.append(level)
-        fail_modes.append(fail if fail else ['None'])
-
-    df = pd.DataFrame({
-        'Time': pd.date_range(datetime.now(), periods=len(cape), freq='H'),
-        'CAPE (J/kg)': cape,
-        '0-3 km Shear (kt)': shear03,
-        '0-6 km Shear (kt)': shear06,
-        'SRH 0-3 km (m2/s2)': srh,
-        'EHI': ehi,
-        'STP': stp,
-        'Precip (in)': precip,
-        'Risk Level': risk_level,
-        'Fail Modes': fail_modes
-    })
-    return df
-
-# ----------------------
-# 4. Web Interface
-# ----------------------
+# ---------- MAIN ----------
 def main():
-    data = fetch_hrrr()
-    if data is None:
-        ui.label("Error fetching HRRR data.")
-        return
+    print("Fetching weather data...")
+    data = fetch_weather()
+    print("Calculating risk...")
+    results = calculate_risk(data)
+    
+    df = pd.DataFrame(results)
+    print("\n--- 24-Hour Severe Weather Risk ---")
+    print(df.to_string(index=False))
 
-    df = evaluate_risk(data)
+    # Optional: overall max score and risk
+    max_score = max([r["Score"] for r in results])
+    if max_score <= 2: overall_risk = "Low"
+    elif max_score <= 4: overall_risk = "Marginal"
+    elif max_score <= 6: overall_risk = "Moderate"
+    else: overall_risk = "High"
+    
+    print(f"\nOverall 24h Risk Level: {overall_risk} (Max Score: {max_score})")
 
-    ui.label(f"Severe Weather Forecast for 24h ({datetime.now():%Y-%m-%d %H:%M})")
-    ui.table(df.to_dict(orient='records'), columns=[{'name': c, 'label': c} for c in df.columns])
-
-    # Optional: simple CAPE plot
-    ui.plot()
-    fig = df[['Time', 'CAPE (J/kg)']].set_index('Time').plot(title='CAPE over next 24h')
-    ui.label("CAPE Plot")
-
-    ui.run(title="Severe Weather Risk Checker")
-
-# ----------------------
-# 5. Run
-# ----------------------
 if __name__ in {"__main__", "__mp_main__"}:
     main()
