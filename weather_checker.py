@@ -1,132 +1,128 @@
-# weather_checker_operational.py
-import requests
-import numpy as np
+# weather_checker.py
+import herbie
 import pandas as pd
-import matplotlib.pyplot as plt
+import numpy as np
 from datetime import datetime, timedelta
+import pytz
+from nicegui import ui
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
+import io
+import base64
 
-# ---------------------------
-# CONFIGURATION
-# ---------------------------
-LATITUDE = 39.29      # Example: Baltimore, MD
+# ----------------------------
+# CONFIG
+# ----------------------------
+LATITUDE = 39.29
 LONGITUDE = -76.61
-FORECAST_HOURS = 24
-TIMEZONE = "America/New_York"
+TIMEZONE = 'America/New_York'
+FORECAST_HOURS = 24  # operational 24h
+MODEL = 'hrrr'
 
-# ---------------------------
-# FETCH DATA (HRRR or Open Meteo)
-# ---------------------------
+# ----------------------------
+# UTILITY FUNCTIONS
+# ----------------------------
+
 def fetch_weather():
-    url = (
-        f"https://api.open-meteo.com/v1/forecast?"
-        f"latitude={LATITUDE}&longitude={LONGITUDE}&"
-        f"hourly=cape,cape_surface,cin,surface_temperature,surface_dewpoint,"
-        f"wind_speed_10m,wind_direction_10m,"
-        f"wind_speed_700hPa,wind_direction_700hPa,"
-        f"wind_speed_500hPa,wind_direction_500hPa,"
-        f"wind_speed_300hPa,wind_direction_300hPa,"
-        f"storm_relative_helicity_0_3km,"
-        f"precipitation&forecast_days=2&timezone={TIMEZONE}"
-    )
-    resp = requests.get(url)
-    resp.raise_for_status()
-    return resp.json()
+    """Fetch HRRR data via Herbie."""
+    try:
+        hrrr = herbie.HRRR()
+        data = hrrr.grib(
+            variables=['cape', 'cin', 'wind', 'srh'], 
+            levels=['surface','0-3km','0-6km','500hPa','300hPa'],
+            latitude=LATITUDE,
+            longitude=LONGITUDE,
+            forecast_hours=FORECAST_HOURS
+        )
+        return data
+    except Exception as e:
+        print(f"ERROR fetching weather: {e}")
+        return None
 
-# ---------------------------
-# CALCULATE SHEAR, EHI, STP
-# ---------------------------
-def calculate_metrics(data):
-    hours = data['hourly']['time'][:FORECAST_HOURS]
-    cape = np.array(data['hourly']['cape'][:FORECAST_HOURS])
-    cin = np.array(data['hourly']['cin'][:FORECAST_HOURS])
-    shear_0_3 = np.array(data['hourly']['wind_speed_10m'][:FORECAST_HOURS])
-    shear_0_6 = np.array(data['hourly']['wind_speed_500hPa'][:FORECAST_HOURS])
-    helicity = np.array(data['hourly'].get('storm_relative_helicity_0_3km', [0]*FORECAST_HOURS))
-    precip = np.array(data['hourly']['precipitation'][:FORECAST_HOURS])
-    
-    # EHI = (CAPE / 1000) * (Helicity / 160)
-    ehi = (cape / 1000) * (helicity / 160)
-    
-    # STP simplified = (CAPE / 1500) * (shear_0_3 / 20) * (helicity / 150)
-    stp = (cape / 1500) * (shear_0_3 / 20) * (helicity / 150)
-    
-    # Risk scoring
-    score = []
-    for i in range(FORECAST_HOURS):
-        s = 0
-        if cape[i] > 500: s += 1
-        if cape[i] > 1500: s += 1
-        if shear_0_3[i] > 20: s += 1
-        if shear_0_6[i] > 40: s += 1
-        if ehi[i] > 1: s += 2
-        if stp[i] > 1: s += 2
-        score.append(s)
-    
-    return pd.DataFrame({
-        'Time': hours,
-        'CAPE': cape,
-        'CIN': cin,
-        '0-3km Shear': shear_0_3,
-        '0-6km Shear': shear_0_6,
-        'Helicity': helicity,
-        'EHI': ehi,
-        'STP': stp,
-        'Score': score,
-        'Precip': precip
-    })
+def calculate_shear(wind_low, wind_high):
+    """Compute vector difference (kts)"""
+    return np.sqrt((wind_high[:,0]-wind_low[:,0])**2 + (wind_high[:,1]-wind_low[:,1])**2)
 
-# ---------------------------
-# SUMMARIZE RISK
-# ---------------------------
-def summarize_risk(df):
-    max_cape = df['CAPE'].max()
-    avg_shear = df['0-3km Shear'].mean()
-    total_precip = df['Precip'].sum()
-    
-    total_score = df['Score'].max()
-    if total_score >= 7: risk_level = "High"
-    elif total_score >= 5: risk_level = "Moderate"
-    elif total_score >= 3: risk_level = "Marginal"
-    else: risk_level = "Low"
-    
-    print(f"Risk Level: {risk_level} (Score: {total_score}/8)")
-    print(f"Next {FORECAST_HOURS}h — Max CAPE: {max_cape:.0f} J/kg | Avg 0–3 km Shear: {avg_shear:.1f} kt | Total Precip: {total_precip:.2f} in")
-    
-    risky_hours = df[df['Score'] >= 3]
-    if not risky_hours.empty:
-        print(f"{len(risky_hours)} potentially risky hours detected:")
-        for _, row in risky_hours.iterrows():
-            parts = []
-            if row['0-3km Shear'] > 25: parts.append(f"Strong 0–3 km Shear ({row['0-3km Shear']:.0f} kt)")
-            if row['0-6km Shear'] > 50: parts.append(f"Strong Deep-Layer Shear ({row['0-6km Shear']:.0f} kt)")
-            if row['EHI'] > 1: parts.append(f"High EHI ({row['EHI']:.2f})")
-            if row['STP'] > 1: parts.append(f"High STP ({row['STP']:.2f})")
-            print(f"{row['Time']}: {', '.join(parts)}")
-    else:
-        print("No severe weather setups detected.")
+def compute_ehi(cape, srh):
+    """Energy Helicity Index"""
+    # simple scaling
+    return (cape/1000.0)*(srh/100.0)
 
-# ---------------------------
-# OPTIONAL: PLOTS
-# ---------------------------
-def plot_metrics(df):
-    plt.figure(figsize=(10,5))
-    plt.plot(df['Time'], df['CAPE'], label='CAPE (J/kg)')
-    plt.plot(df['Time'], df['0-3km Shear'], label='0-3km Shear (kt)')
-    plt.plot(df['Time'], df['EHI'], label='EHI')
-    plt.plot(df['Time'], df['STP'], label='STP')
-    plt.xticks(rotation=45)
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
+def compute_stp(cape, shear, srh, lcl, conv_depth):
+    """Significant Tornado Parameter"""
+    # approximate formula for operational scoring
+    return (cape/1500)*(shear/20)*(srh/100)*(2000/lcl)*(conv_depth/10000)
 
-# ---------------------------
-# MAIN
-# ---------------------------
+def spc_risk_score(cape, shear, ehi, stp):
+    score = 0
+    if cape > 1500: score += 2
+    if shear > 25: score += 2
+    if ehi > 1: score += 2
+    if stp > 1: score += 2
+
+    if score >= 7: return "High"
+    if score >= 5: return "Moderate"
+    if score >= 3: return "Marginal"
+    return "Low"
+
+def plot_skewt(data):
+    fig, ax = plt.subplots(figsize=(6,6))
+    ax.plot(data['temperature'], data['pressure'], 'r')
+    ax.plot(data['dewpoint'], data['pressure'], 'g')
+    ax.set_ylim(1050,100)
+    ax.set_xlim(-40,60)
+    ax.set_xlabel('Temperature [°C]')
+    ax.set_ylabel('Pressure [hPa]')
+    canvas = FigureCanvas(fig)
+    buf = io.BytesIO()
+    canvas.print_png(buf)
+    return base64.b64encode(buf.getvalue()).decode('utf-8')
+
+# ----------------------------
+# MAIN FUNCTION
+# ----------------------------
+
 def main():
     data = fetch_weather()
-    df = calculate_metrics(data)
-    summarize_risk(df)
-    plot_metrics(df)
+    if data is None:
+        ui.label("Error fetching weather data.")
+        return
 
-if __name__ == "__main__":
+    table = []
+    for i in range(FORECAST_HOURS):
+        cape = data['cape'][i]
+        shear_03 = data['shear_0_3km'][i]
+        shear_06 = data['shear_0_6km'][i]
+        srh = data['srh_0_3km'][i]
+        ehi = compute_ehi(cape, srh)
+        stp = compute_stp(cape, shear_03, srh, lcl=1000, conv_depth=12000)
+
+        risk = spc_risk_score(cape, shear_03, ehi, stp)
+        table.append({
+            'Time': (datetime.now(pytz.timezone(TIMEZONE)) + timedelta(hours=i)).strftime('%Y-%m-%d %H:%M'),
+            'CAPE': cape,
+            '0-3 km Shear': shear_03,
+            '0-6 km Shear': shear_06,
+            'SRH': srh,
+            'EHI': round(ehi,2),
+            'STP': round(stp,2),
+            'Risk': risk
+        })
+
+    df = pd.DataFrame(table)
+
+    ui.label("### 24h Severe Weather Forecast")
+    ui.table(df.to_dict('records'), columns=list(df.columns))
+
+    # optional plot
+    skewt_img = plot_skewt({'temperature': data['temperature'], 'pressure': data['pressure']})
+    ui.image(f"data:image/png;base64,{skewt_img}")
+
+    ui.run()
+
+# ----------------------------
+# ENTRY POINT
+# ----------------------------
+
+if __name__ in {"__main__", "__mp_main__"}:
     main()
