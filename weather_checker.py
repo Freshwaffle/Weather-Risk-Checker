@@ -1,128 +1,104 @@
 # weather_checker.py
 import herbie
-import pandas as pd
 import numpy as np
+import pandas as pd
+from metpy.calc import cape_cin, bulk_shear, storm_relative_helicity
+from metpy.units import units
 from datetime import datetime, timedelta
-import pytz
-from nicegui import ui
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
-import io
-import base64
 
-# ----------------------------
-# CONFIG
-# ----------------------------
-LATITUDE = 39.29
-LONGITUDE = -76.61
-TIMEZONE = 'America/New_York'
-FORECAST_HOURS = 24  # operational 24h
-MODEL = 'hrrr'
+def fetch_hrrr(lat=39.29, lon=-76.61, forecast_hours=24):
+    """
+    Fetch HRRR data for the next 24 hours.
+    """
+    # Load HRRR via Herbie
+    hrrr = herbie.grib('HRRR:13:0')  # 13 km HRRR, surface+upper levels
+    data = hrrr.subset(lat=lat, lon=lon, levels=['surface', '700', '500', '300'])
+    return data
 
-# ----------------------------
-# UTILITY FUNCTIONS
-# ----------------------------
+def calculate_severe_params(data):
+    """
+    Compute severe weather parameters: CAPE, CIN, shear, SRH, EHI, STP, total precip.
+    """
+    results = []
+    for i in range(len(data['time'])):
+        # Surface conditions
+        temp = data['surface_temperature'][i] * units.kelvin
+        dew = data['surface_dewpoint'][i] * units.kelvin
 
-def fetch_weather():
-    """Fetch HRRR data via Herbie."""
-    try:
-        hrrr = herbie.HRRR()
-        data = hrrr.grib(
-            variables=['cape', 'cin', 'wind', 'srh'], 
-            levels=['surface','0-3km','0-6km','500hPa','300hPa'],
-            latitude=LATITUDE,
-            longitude=LONGITUDE,
-            forecast_hours=FORECAST_HOURS
-        )
-        return data
-    except Exception as e:
-        print(f"ERROR fetching weather: {e}")
-        return None
+        # Compute CAPE/CIN
+        try:
+            sfc_pressure = 1000 * units.hPa  # approximate surface
+            cape, cin = cape_cin(sfc_pressure, temp, dew)
+        except:
+            cape, cin = 0, 0
 
-def calculate_shear(wind_low, wind_high):
-    """Compute vector difference (kts)"""
-    return np.sqrt((wind_high[:,0]-wind_low[:,0])**2 + (wind_high[:,1]-wind_low[:,1])**2)
+        # Shear
+        u_lower = data['wind_u_0_3km'][i] * units.meter / units.second
+        v_lower = data['wind_v_0_3km'][i] * units.meter / units.second
+        u_upper = data['wind_u_0_6km'][i] * units.meter / units.second
+        v_upper = data['wind_v_0_6km'][i] * units.meter / units.second
+        shear_0_3km, shear_0_6km = bulk_shear([u_lower, u_upper], [v_lower, v_upper])
 
-def compute_ehi(cape, srh):
-    """Energy Helicity Index"""
-    # simple scaling
-    return (cape/1000.0)*(srh/100.0)
+        # Storm-relative helicity
+        srh_0_3km = storm_relative_helicity(u_lower, v_lower, u_upper, v_upper)
 
-def compute_stp(cape, shear, srh, lcl, conv_depth):
-    """Significant Tornado Parameter"""
-    # approximate formula for operational scoring
-    return (cape/1500)*(shear/20)*(srh/100)*(2000/lcl)*(conv_depth/10000)
+        # EHI (simplified)
+        ehi = (cape / 1000) * (srh_0_3km / 100)
 
-def spc_risk_score(cape, shear, ehi, stp):
-    score = 0
-    if cape > 1500: score += 2
-    if shear > 25: score += 2
-    if ehi > 1: score += 2
-    if stp > 1: score += 2
+        # STP (simplified proxy)
+        stp = ehi * (shear_0_3km.magnitude / 20)
 
-    if score >= 7: return "High"
-    if score >= 5: return "Moderate"
-    if score >= 3: return "Marginal"
-    return "Low"
+        # Precip
+        precip = data['precipitation'][i]
 
-def plot_skewt(data):
-    fig, ax = plt.subplots(figsize=(6,6))
-    ax.plot(data['temperature'], data['pressure'], 'r')
-    ax.plot(data['dewpoint'], data['pressure'], 'g')
-    ax.set_ylim(1050,100)
-    ax.set_xlim(-40,60)
-    ax.set_xlabel('Temperature [°C]')
-    ax.set_ylabel('Pressure [hPa]')
-    canvas = FigureCanvas(fig)
-    buf = io.BytesIO()
-    canvas.print_png(buf)
-    return base64.b64encode(buf.getvalue()).decode('utf-8')
-
-# ----------------------------
-# MAIN FUNCTION
-# ----------------------------
-
-def main():
-    data = fetch_weather()
-    if data is None:
-        ui.label("Error fetching weather data.")
-        return
-
-    table = []
-    for i in range(FORECAST_HOURS):
-        cape = data['cape'][i]
-        shear_03 = data['shear_0_3km'][i]
-        shear_06 = data['shear_0_6km'][i]
-        srh = data['srh_0_3km'][i]
-        ehi = compute_ehi(cape, srh)
-        stp = compute_stp(cape, shear_03, srh, lcl=1000, conv_depth=12000)
-
-        risk = spc_risk_score(cape, shear_03, ehi, stp)
-        table.append({
-            'Time': (datetime.now(pytz.timezone(TIMEZONE)) + timedelta(hours=i)).strftime('%Y-%m-%d %H:%M'),
-            'CAPE': cape,
-            '0-3 km Shear': shear_03,
-            '0-6 km Shear': shear_06,
-            'SRH': srh,
-            'EHI': round(ehi,2),
-            'STP': round(stp,2),
-            'Risk': risk
+        results.append({
+            'time': data['time'][i],
+            'CAPE': cape.magnitude,
+            'CIN': cin.magnitude,
+            '0-3 km Shear': shear_0_3km.magnitude,
+            '0-6 km Shear': shear_0_6km.magnitude,
+            'SRH 0-3 km': srh_0_3km,
+            'EHI': ehi,
+            'STP': stp,
+            'Precip (in)': precip
         })
 
-    df = pd.DataFrame(table)
+    return pd.DataFrame(results)
 
-    ui.label("### 24h Severe Weather Forecast")
-    ui.table(df.to_dict('records'), columns=list(df.columns))
+def score_risk(df):
+    """
+    Score risk level based on thresholds. Adjust thresholds as needed.
+    """
+    score = 0
+    if df['CAPE'].max() > 500: score += 2
+    if df['CAPE'].max() > 1500: score += 2
+    if df['0-3 km Shear'].max() > 20: score += 2
+    if df['0-6 km Shear'].max() > 40: score += 2
+    if df['Precip (in)'].sum() > 0.5: score += 1
+    if df['EHI'].max() > 1: score += 2
+    if df['STP'].max() > 1: score += 2
 
-    # optional plot
-    skewt_img = plot_skewt({'temperature': data['temperature'], 'pressure': data['pressure']})
-    ui.image(f"data:image/png;base64,{skewt_img}")
+    if score >= 7:
+        risk = "High"
+    elif score >= 5:
+        risk = "Moderate"
+    elif score >= 3:
+        risk = "Marginal"
+    else:
+        risk = "Low"
 
-    ui.run()
+    return risk, score
 
-# ----------------------------
-# ENTRY POINT
-# ----------------------------
+def main():
+    print("Fetching HRRR data...")
+    data = fetch_hrrr()
+    print("Calculating severe weather parameters...")
+    df = calculate_severe_params(data)
+    risk_level, score = score_risk(df)
+
+    print(f"\nRisk Level: {risk_level} (Score: {score}/12)")
+    print("Next 24h Forecast:")
+    print(df[['time', 'CAPE', '0-3 km Shear', '0-6 km Shear', 'EHI', 'STP', 'Precip (in)']])
 
 if __name__ in {"__main__", "__mp_main__"}:
     main()
