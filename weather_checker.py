@@ -1,200 +1,162 @@
 from nicegui import ui
-import herbie
-import xarray as xr
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-from metpy.calc import cape_cin, storm_relative_helicity, bulk_shear
-from metpy.units import units
-from datetime import datetime
-from io import BytesIO
-import base64
-import warnings
+import requests
+import math
 
-warnings.filterwarnings('ignore')
+# ===== Constants =====
+KMH_TO_KT = 0.539957
+MM_TO_IN = 0.0393701
 
-# ======================
-# Defaults
-# ======================
-LAT, LON = 39.29, -76.61  # default Baltimore, MD
+# ===== Default location =====
+LAT, LON = 39.29, -76.61  # Baltimore, MD
 
-# ======================
-# Utilities
-# ======================
-def wind_to_uv(speed, direction):
-    """Convert wind speed (kt) + direction (deg) to u/v components."""
-    rad = np.radians(direction)
-    u = -speed * np.sin(rad)
-    v = -speed * np.cos(rad)
+# ===== Helper functions =====
+def wind_to_uv(speed_kt, direction_deg):
+    rad = math.radians(direction_deg)
+    u = -speed_kt * math.sin(rad)
+    v = -speed_kt * math.cos(rad)
     return u, v
 
-def grib_download(run_time, model='hrrr'):
-    """
-    Download HRRR (or fallback RAP/GFS) data at nearest runtime
-    for the specified lat/lon point.
-    """
-    try:
-        H = herbie.Herbie(run_time, model=model, product="prs")
-        H.download(lat=LAT, lon=LON)
-        return H.xarray()
-    except Exception as e:
-        print(f"{model.upper()} fetch failed ({e}), trying RAP ...")
-        try:
-            H = herbie.Herbie(run_time, model='rap', product="prs")
-            H.download(lat=LAT, lon=LON)
-            return H.xarray()
-        except Exception as e2:
-            print(f"RAP failed ({e2}), trying GFS ...")
-            H = herbie.Herbie(run_time, model='gfs', product="prs")
-            H.download(lat=LAT, lon=LON)
-            return H.xarray()
-
-def plot_series(times, data1, data2=None, labels=None, title=""):
-    """Make a base64-encoded PNG for NiceGUI."""
-    fig, ax = plt.subplots()
-    ax.plot(times, data1, label=labels[0] if labels else None, color='C0')
-    if data2 is not None:
-        ax.plot(times, data2, label=labels[1] if labels else None, color='C1')
-    ax.set_title(title)
-    ax.tick_params(axis='x', rotation=45)
-    ax.grid(True)
-    if labels:
-        ax.legend()
-    fig.tight_layout()
-
-    buf = BytesIO()
-    plt.savefig(buf, format='png')
-    plt.close()
-    buf.seek(0)
-    return base64.b64encode(buf.read()).decode('utf-8')
-
-# ======================
-# Main Handler
-# ======================
+# ===== Fetch and analyze data =====
 def fetch_and_analyze():
-    now = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
+    url = (
+        f"https://api.open-meteo.com/v1/forecast?"
+        f"latitude={LAT}&longitude={LON}&"
+        f"hourly=cape,wind_speed_10m,wind_direction_10m,"
+        f"wind_speed_700hPa,wind_direction_700hPa,"
+        f"wind_speed_300hPa,wind_direction_300hPa,precipitation&"
+        f"forecast_days=2&timezone=America/New_York"
+    )
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        data = response.json()['hourly']
 
-    ds = grib_download(now)
-    profile = ds.sel(time=ds.time[:24])
+        alerts = []
 
-    times = [str(t.values) for t in profile.time]
+        # ===== HOURLY FLAGS =====
+        for i in range(len(data['time'])):
+            time_str = data['time'][i]
+            cape = data['cape'][i] or 0
 
-    cape_vals, cin_vals = [], []
-    shear03_vals, shear06_vals = [], []
-    srh01_vals, srh03_vals = [], []
-    ehi_vals, stp_vals = [], []
-    precip_vals = []
-    alerts = []
+            spd_sfc = (data['wind_speed_10m'][i] or 0) * KMH_TO_KT
+            dir_sfc = data['wind_direction_10m'][i]
 
-    for i in range(len(profile.time)):
-        px = profile.isel(time=i)
+            spd_700 = (data['wind_speed_700hPa'][i] or 0) * KMH_TO_KT
+            dir_700 = data['wind_direction_700hPa'][i]
 
-        # Pressure, temperature, dewpoint
-        p = px['pressure'] * units.hPa
-        t = px['temperature'] * units.degC
-        td = px['dewpoint'] * units.degC
+            spd_300 = (data['wind_speed_300hPa'][i] or 0) * KMH_TO_KT
+            dir_300 = data['wind_direction_300hPa'][i]
 
-        # CAPE/CIN
-        mlcape, mlcin = cape_cin(p, t, td)
-        cape_vals.append(mlcape.magnitude)
-        cin_vals.append(mlcin.magnitude)
+            # Calculate shear
+            shear_03 = 0
+            shear_deep = 0
+            if dir_sfc is not None and dir_700 is not None:
+                u_sfc, v_sfc = wind_to_uv(spd_sfc, dir_sfc)
+                u_700, v_700 = wind_to_uv(spd_700, dir_700)
+                shear_03 = ((u_700 - u_sfc)**2 + (v_700 - v_sfc)**2) ** 0.5
+            if dir_sfc is not None and dir_300 is not None:
+                u_sfc, v_sfc = wind_to_uv(spd_sfc, dir_sfc)
+                u_300, v_300 = wind_to_uv(spd_300, dir_300)
+                shear_deep = ((u_300 - u_sfc)**2 + (v_300 - v_sfc)**2) ** 0.5
 
-        # Vertical winds
-        wspd = px['wind_speed'] * units('kt')
-        wdir = px['wind_direction'] * units('degree')
-        u, v = wind_to_uv(wspd.magnitude, wdir.magnitude)
+            precip = (data['precipitation'][i] or 0) * MM_TO_IN
 
-        # Shear: 0–3 km and 0–6 km
-        shear03 = bulk_shear(p, u, v, 0 * units.km, 3 * units.km).magnitude
-        shear06 = bulk_shear(p, u, v, 0 * units.km, 6 * units.km).magnitude
-        shear03_vals.append(shear03)
-        shear06_vals.append(shear06)
+            flags = []
+            if cape >= 1500:
+                flags.append(f"High Instability (CAPE {cape:.0f})")
+            if shear_03 >= 25:
+                flags.append(f"Strong 0–3 km Shear ({shear_03:.0f} kt)")
+            if shear_deep >= 35:
+                flags.append(f"Strong Deep-Layer Shear ({shear_deep:.0f} kt)")
+            if precip >= 0.75:
+                flags.append(f"Heavy Rain ({precip:.2f} in)")
 
-        # SRH: 0–1 km & 0–3 km
-        srh01 = storm_relative_helicity(p, u, v, 0 * units.km, 1 * units.km).magnitude
-        srh03 = storm_relative_helicity(p, u, v, 0 * units.km, 3 * units.km).magnitude
-        srh01_vals.append(srh01)
-        srh03_vals.append(srh03)
+            if len(flags) >= 2:
+                alerts.append(f"{time_str}: {', '.join(flags)}")
 
-        # Precip
-        precip_vals.append(px['precipitation'].values * MM_TO_IN)
+        # ===== 24-hour summary =====
+        cape_vals = [c for c in data['cape'][:24] if c is not None]
+        max_cape = max(cape_vals) if cape_vals else 0
 
-        # EHI & STP proxies
-        ehi = (mlcape.magnitude * srh03) / 160000 if mlcape.magnitude > 0 else 0
-        stp = ((mlcape.magnitude/1500)*(srh03/150)*(shear06/40)*(max(0,30-mlcin.magnitude)/30))
-        ehi_vals.append(ehi)
-        stp_vals.append(stp)
+        total_precip = sum((p or 0) * MM_TO_IN for p in data['precipitation'][:24])
 
-        # Hourly flags
-        flags = []
-        if mlcape.magnitude >= 1500: flags.append(f"MLCAPE {mlcape:.0f}")
-        if shear03 >= 25: flags.append(f"0–3 km shear {shear03:.0f} kt")
-        if shear06 >= 40: flags.append(f"0–6 km shear {shear06:.0f} kt")
-        if srh03 >= 150: flags.append(f"SRH0–3 km {srh03:.0f}")
-        if px['precipitation'].values*MM_TO_IN >= 0.75:
-            flags.append(f"Precip {precip_vals[-1]:.2f} in")
-        if flags: alerts.append(f"{times[i]}: {', '.join(flags)}")
+        shear_03_list = []
+        shear_deep_list = []
 
-    # 24h summary
-    max_cape = max(cape_vals)
-    total_precip = sum(precip_vals)
-    avg_shear03 = np.mean(shear03_vals)
-    avg_shear06 = np.mean(shear06_vals)
-    max_srh03 = max(srh03_vals)
-    avg_ehi = np.mean(ehi_vals)
-    avg_stp = np.mean(stp_vals)
+        for i in range(min(24, len(data['time']))):
+            if None in [data['wind_direction_10m'][i], data['wind_direction_700hPa'][i], data['wind_direction_300hPa'][i]]:
+                continue
+            u_sfc, v_sfc = wind_to_uv(data['wind_speed_10m'][i] * KMH_TO_KT, data['wind_direction_10m'][i])
+            u_700, v_700 = wind_to_uv(data['wind_speed_700hPa'][i] * KMH_TO_KT, data['wind_direction_700hPa'][i])
+            u_300, v_300 = wind_to_uv(data['wind_speed_300hPa'][i] * KMH_TO_KT, data['wind_direction_300hPa'][i])
+            shear_03_list.append(((u_700 - u_sfc)**2 + (v_700 - v_sfc)**2) ** 0.5)
+            shear_deep_list.append(((u_300 - u_sfc)**2 + (v_300 - v_sfc)**2) ** 0.5)
 
-    # SPC‑style scoring
-    score = 0
-    if max_cape >= 500: score += 1
-    if max_cape >= 1500: score += 2
-    if avg_shear03 >= 25: score += 1
-    if avg_shear06 >= 40: score += 2
-    if max_srh03 >= 150: score += 2
-    if total_precip >= 0.75: score += 1
-    if avg_ehi >= 1: score += 1
-    if avg_stp >= 0.5: score += 1
+        avg_shear_03 = sum(shear_03_list)/len(shear_03_list) if shear_03_list else 0
+        avg_shear_deep = sum(shear_deep_list)/len(shear_deep_list) if shear_deep_list else 0
 
-    risk_level = "Low"
-    if score >= 3: risk_level = "Marginal"
-    if score >= 5: risk_level = "Moderate"
-    if score >= 7: risk_level = "High"
+        # ===== Risk scoring =====
+        score = 0
+        if max_cape >= 500: score += 1
+        if max_cape >= 1500: score += 2
+        if max_cape >= 2500: score += 2
+        if avg_shear_deep >= 30: score += 1
+        if avg_shear_deep >= 40: score += 2
+        if avg_shear_deep >= 50: score += 1
+        if total_precip >= 0.75: score += 1
+        if total_precip >= 1.5: score += 1
 
-    result_container.clear()
-    with result_container:
-        ui.label(f"Risk Level: {risk_level} (Score {score})").classes("text-2xl font-bold")
-        ui.label(
-            f"24h — Max CAPE: {max_cape:.0f} J/kg | "
-            f"Avg 0–3 km shear: {avg_shear03:.1f} kt | "
-            f"Avg 0–6 km shear: {avg_shear06:.1f} kt | "
-            f"Max SRH0–3 km: {max_srh03:.0f} | "
-            f"Total precip: {total_precip:.2f} in"
-        )
+        risk_level = "Low"
+        if score >= 3: risk_level = "Marginal"
+        if score >= 5: risk_level = "Moderate"
+        if score >= 7: risk_level = "High, Severe Potential!"
 
-        for a in alerts: ui.label(a)
+        # ===== Display in UI =====
+        result_container.clear()
+        with result_container:
+            color = "text-green-500"
+            if score >= 3: color = "text-yellow-500"
+            if score >= 5: color = "text-orange-500"
+            if score >= 7: color = "text-red-600"
 
-        ui.html(plot_series(times, cape_vals, shear03_vals, labels=["CAPE","0–3 km shear"], title="CAPE & Shear"))
-        ui.html(plot_series(times, srh01_vals, srh03_vals, labels=["SRH0–1km","SRH0–3km"], title="SRH"))
-        ui.html(plot_series(times, ehi_vals, stp_vals, labels=["EHI","STP"], title="EHI & STP"))
+            ui.label(f"Risk Level: {risk_level} (Score {score}/8)").classes(f"text-2xl font-bold {color}")
+            ui.label(
+                f"Next 24h — Max CAPE: {max_cape:.0f} J/kg | "
+                f"Avg 0–3 km Shear: {avg_shear_03:.1f} kt | "
+                f"Avg 0–6 km Shear: {avg_shear_deep:.1f} kt | "
+                f"Total Precip: {total_precip:.2f} in"
+            ).classes("text-lg mb-4")
 
-# ======================
-# UI Setup
-# ======================
-ui.label("Operational Severe Weather Checker").classes("text-4xl text-center")
+            if alerts:
+                ui.label(f"{len(alerts)} potentially risky hours detected:").classes("text-xl text-red-600")
+                for a in alerts:
+                    ui.label(a)
+            else:
+                ui.label("No Severe Weather Setups Detected").classes("text-green-600")
+
+    except Exception as e:
+        result_container.clear()
+        ui.label(f"Error: {e}").classes("text-red-600")
+
+
+# ===== UI =====
+ui.label("Severe Weather Ingredients Checker").classes("text-4xl font-bold text-center mt-4")
+ui.label("Powered by Open-Meteo").classes("text-center mb-6")
+
 with ui.card().classes("w-96 mx-auto p-6"):
-    ui.label("Location (lat/lon)")
-    lat_input = ui.number(LAT, label="Latitude")
-    lon_input = ui.number(LON, label="Longitude")
+    ui.label("Location (Lat / Lon)")
+    lat_input = ui.number(value=LAT, label="Latitude")
+    lon_input = ui.number(value=LON, label="Longitude")
 
-    def update_loc():
+    def update_location():
         global LAT, LON
         LAT = lat_input.value
         LON = lon_input.value
-        ui.notify(f"Location set to {LAT}, {LON}")
+        ui.notify(f"Location updated to {LAT}, {LON}")
 
-    ui.button("Set Location", on_click=update_loc)
+    ui.button("Update Location", on_click=update_location)
 
-ui.button("RUN ANALYSIS", on_click=fetch_and_analyze).classes("mx-auto mt-6")
+ui.button("CHECK NOW", on_click=fetch_and_analyze).classes("mx-auto mt-6")
 result_container = ui.card().classes("w-full max-w-4xl mx-auto mt-8 p-6")
 
-ui.run(title="Operational Severe Weather Checker", dark=True, host='0.0.0.0', port=8080)
+ui.run(title="MD Severe Weather Checker", dark=True)
