@@ -122,7 +122,7 @@ def fetch_and_analyze():
 
         shear_01, shear_03, deep_shear = [], [], []
         avg_srh = sum(srh_vals[:24]) / len(srh_vals[:24]) if srh_vals else 0
-        srh_display = f"{abs(avg_srh):.0f} m²/s² ({'+' if avg_srh >= 0 else '-'} sign)"
+        srh_display = f"{abs(avg_srh):.0f} m²/s² ({'+' if avg_srh >= 0 else '-'} – {'cyclonic (favors right-movers)' if avg_srh >= 0 else 'anticyclonic (rare, low tornado threat)'})"
 
         for i in range(24):
             if all(data.get(k)[i] is not None for k in ['wind_direction_10m', 'wind_direction_925hPa', 'wind_direction_700hPa', 'wind_direction_300hPa']):
@@ -199,8 +199,8 @@ def fetch_and_analyze():
 
         # ===== UI OUTPUT =====
         result_container.clear()
-        ui.label(f"Analysis Refreshed: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}").classes("text-sm text-gray-500 mb-2")
         with result_container:
+            ui.label(f"Analysis Refreshed: {datetime.now().strftime('%Y-%m-%d %I:%M %p EST')}").classes("text-sm text-gray-500 mb-2")
             color = "text-green-500" if risk_level == "NONE" else "text-yellow-500"
             if risk_level in ["SLGT", "ENH"]: color = "text-orange-500"
             if risk_level in ["MDT", "HIGH"]: color = "text-red-600"
