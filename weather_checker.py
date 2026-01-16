@@ -200,11 +200,11 @@ def fetch_and_analyze():
                 f"SCP: {scp:.1f} | STP: {stp:.1f} | Total Precip: {total_precip:.1f} in | Avg RH: {avg_rh:.0f}%"
             ).classes("text-lg mb-4")
 
-            ui.label("Most Likely Outcome (D):").classes("text-xl font-bold")
+            ui.label("Most Likely Outcome:").classes("text-xl font-bold")
             ui.label(likely_outcome).classes("text-md")
 
             if fail_modes:
-                ui.label("Possible Fail Modes (C):").classes("text-xl font-bold text-yellow-600")
+                ui.label("Possible Fail Modes:").classes("text-xl font-bold text-yellow-600")
                 for fm in fail_modes:
                     ui.label(f"- {fm}")
 
