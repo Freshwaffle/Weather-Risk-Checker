@@ -1,2 +1,5 @@
 nicegui
 requests
+pandas
+matplotlib
+numpy

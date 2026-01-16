@@ -3,220 +3,258 @@ import requests
 from datetime import datetime
 import math
 
-# =====================
-# Constants & Utilities
-# =====================
-
-KMH_TO_KT = 0.539957
-MM_TO_IN = 0.0393701
-
 def wind_to_uv(speed_kt, direction_deg):
     rad = math.radians(direction_deg)
     u = -speed_kt * math.sin(rad)
     v = -speed_kt * math.cos(rad)
     return u, v
 
-# =====================
-# Default Location
-# =====================
 
-LAT, LON = 39.29, -76.61  # Baltimore
+KMH_TO_KT = 0.539957
+MM_TO_IN = 0.0393701
 
-# =====================
-# Data Fetch
-# =====================
+# Default: Baltimore, MD
+LAT, LON = 39.29, -76.61
 
-def fetch_open_meteo(lat, lon):
+# New: Fetch SPC Day 1 categorical outlook (scrape from site; use browse_page in prod if needed)
+def get_spc_outlook():
+    try:
+        url = "https://www.spc.noaa.gov/products/outlook/day1otlk_cat.kml"  # Or JSON if available
+        response = requests.get(url)
+        response.raise_for_status()
+        data = response.text.lower()  # Simple parse for risk levels
+        if "high" in data: return "HIGH"
+        elif "mdt" in data or "moderate" in data: return "MDT"
+        elif "enh" in data or "enhanced" in data: return "ENH"
+        elif "slgt" in data or "slight" in data: return "SLGT"
+        elif "mrgl" in data or "marginal" in data: return "MRGL"
+        else: return "NONE"
+    except:
+        return "Unable to fetch SPC outlook"
+
+def fetch_and_analyze():
     url = (
-        "https://api.open-meteo.com/v1/forecast"
-        f"?latitude={lat}&longitude={lon}"
-        "&hourly="
-        "cape,lifted_index,relative_humidity_2m,"
-        "wind_speed_10m,wind_direction_10m,"
-        "wind_speed_925hPa,wind_direction_925hPa,"
-        "wind_speed_700hPa,wind_direction_700hPa,"
-        "wind_speed_300hPa,wind_direction_300hPa,"
-        "precipitation"
-        "&forecast_days=2"
-        "&timezone=America/New_York"
+        f"https://api.open-meteo.com/v1/forecast"
+        f"?latitude={LAT}&longitude={LON}"
+        f"&hourly="
+        f"cape,lifted_index,"  # Added LI for better instability proxy
+        f"wind_speed_10m,wind_direction_10m,"
+        f"wind_speed_925hPa,wind_direction_925hPa,"  # ~1km
+        f"wind_speed_700hPa,wind_direction_700hPa,"  # ~3km
+        f"wind_speed_300hPa,wind_direction_300hPa,"  # Deep
+        f"precipitation,relative_humidity_2m"  # Added RH for moisture/fail modes
+        f"&forecast_days=2"
+        f"&timezone=America/New_York"
     )
-    r = requests.get(url, timeout=20)
-    r.raise_for_status()
-    return r.json()["hourly"]
 
-# =====================
-# Analysis Core
-# =====================
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        data = response.json()['hourly']
 
-def analyze(hourly):
-    shear01, shear03, shear06 = [], [], []
-    alerts = []
+        alerts = []
+        
 
-    for i in range(24):
-        try:
-            cape = hourly["cape"][i] or 0
-            li = hourly["lifted_index"][i] or 9
-            rh = hourly["relative_humidity_2m"][i] or 0
+        # ===== HOURLY FLAGS (A: Ingredients) =====
+        for i in range(len(data['time'])):
+            dt = datetime.fromisoformat(data['time'][i])
+            local_time = dt.strftime("%a %I:%M %p")  # Friendly time
 
-            spd_sfc = (hourly["wind_speed_10m"][i] or 0) * KMH_TO_KT
-            spd_925 = (hourly["wind_speed_925hPa"][i] or 0) * KMH_TO_KT
-            spd_700 = (hourly["wind_speed_700hPa"][i] or 0) * KMH_TO_KT
-            spd_300 = (hourly["wind_speed_300hPa"][i] or 0) * KMH_TO_KT
+            cape = data['cape'][i] or 0
+            li = data['lifted_index'][i] or 0  # New: LI < -4 = unstable
+            rh = data['relative_humidity_2m'][i] or 0  # For moisture
 
-            dir_sfc = hourly["wind_direction_10m"][i]
-            dir_925 = hourly["wind_direction_925hPa"][i]
-            dir_700 = hourly["wind_direction_700hPa"][i]
-            dir_300 = hourly["wind_direction_300hPa"][i]
+            spd_sfc = (data['wind_speed_10m'][i] or 0) * KMH_TO_KT
+            dir_sfc = data['wind_direction_10m'][i]
 
-            if None in [dir_sfc, dir_925, dir_700, dir_300]:
-                continue
+            spd_925 = (data['wind_speed_925hPa'][i] or 0) * KMH_TO_KT  # ~1km
+            dir_925 = data['wind_direction_925hPa'][i]
 
-            u_sfc, v_sfc = wind_to_uv(spd_sfc, dir_sfc)
-            u_925, v_925 = wind_to_uv(spd_925, dir_925)
-            u_700, v_700 = wind_to_uv(spd_700, dir_700)
-            u_300, v_300 = wind_to_uv(spd_300, dir_300)
+            spd_700 = (data['wind_speed_700hPa'][i] or 0) * KMH_TO_KT
+            dir_700 = data['wind_direction_700hPa'][i]
 
-            s01 = math.hypot(u_925 - u_sfc, v_925 - v_sfc)
-            s03 = math.hypot(u_700 - u_sfc, v_700 - v_sfc)
-            s06 = math.hypot(u_300 - u_sfc, v_300 - v_sfc)
+            spd_300 = (data['wind_speed_300hPa'][i] or 0) * KMH_TO_KT
+            dir_300 = data['wind_direction_300hPa'][i]
 
-            shear01.append(s01)
-            shear03.append(s03)
-            shear06.append(s06)
+            # Shear calcs
+            shear_03_inst = 0
+            shear_01_inst = 0  # New: 0-1km shear
+            deep_shear_inst = 0
+            
+            if all(x is not None for x in [dir_sfc, dir_925, dir_700, dir_300]):
+                u_sfc, v_sfc = wind_to_uv(spd_sfc, dir_sfc)
+                u_925, v_925 = wind_to_uv(spd_925, dir_925)
+                u_700, v_700 = wind_to_uv(spd_700, dir_700)
+                u_300, v_300 = wind_to_uv(spd_300, dir_300)
 
-            if cape >= 500 and (s06 >= 35 or s03 >= 25):
-                alerts.append(
-                    f"{hourly['time'][i][11:16]} | CAPE {cape:.0f} | 0–6km {s06:.0f} kt"
-                )
+                shear_01_inst = math.sqrt((u_925 - u_sfc)**2 + (v_925 - v_sfc)**2)
+                shear_03_inst = math.sqrt((u_700 - u_sfc)**2 + (v_700 - v_sfc)**2)
+                deep_shear_inst = math.sqrt((u_300 - u_sfc)**2 + (v_300 - v_sfc)**2)
+                
 
-        except:
-            continue
+            precip = (data['precipitation'][i] or 0) * MM_TO_IN
 
-    max_cape = max([c for c in hourly["cape"][:24] if c] or [0])
-    min_li = min([l for l in hourly["lifted_index"][:24] if l is not None] or [9])
-    avg_rh = sum([r for r in hourly["relative_humidity_2m"][:24] if r is not None]) / 24
-    total_qpf = sum((p or 0) * MM_TO_IN for p in hourly["precipitation"][:24])
+            flags = []
+            if cape >= 1000: flags.append(f"Mod Instability (CAPE {cape:.0f})")
+            if cape >= 2000: flags.append(f"High Instability (CAPE {cape:.0f})")
+            if li <= -4: flags.append(f"Unstable (LI {li:.1f})")
+            if shear_01_inst >= 15: flags.append(f"Strong 0-1km Shear ({shear_01_inst:.0f} kt)")
+            if shear_03_inst >= 30: flags.append(f"Strong 0-3km Shear ({shear_03_inst:.0f} kt)")
+            if deep_shear_inst >= 40: flags.append(f"Strong Deep Shear ({deep_shear_inst:.0f} kt)")
+            if precip >= 0.5: flags.append(f"Mod Rain ({precip:.2f} in)")
+            if precip >= 1.0: flags.append(f"Heavy Rain ({precip:.2f} in)")
+            if rh < 50: flags.append(f"Dry Low-Level ({rh}% RH)")
 
-    avg_s01 = sum(shear01) / len(shear01) if shear01 else 0
-    avg_s03 = sum(shear03) / len(shear03) if shear03 else 0
-    avg_s06 = sum(shear06) / len(shear06) if shear06 else 0
+            if len(flags) >= 2 and cape >= 500:  # Filter for actual severe potential
+                alerts.append(f"{local_time}: {', '.join(flags)}")
 
-    # =====================
-    # Instability Gate
-    # =====================
+        # ===== 24H SUMMARY (A & B: Ingredients + Outcomes) =====
+        cape_vals = [c for c in data['cape'][:24] if c is not None]
+        max_cape = max(cape_vals) if cape_vals else 0
+        avg_li = sum([l for l in data['lifted_index'][:24] if l is not None]) / 24 or 0
+        total_precip = sum((p or 0) * MM_TO_IN for p in data['precipitation'][:24])
+        avg_rh = sum([r for r in data['relative_humidity_2m'][:24] if r is not None]) / 24 or 0
 
-    instability_ok = max_cape >= 500 and min_li <= -2
+        
+        for i in range(24):
+            if all(data.get(k)[i] is not None for k in ['wind_direction_10m', 'wind_direction_925hPa', 'wind_direction_700hPa', 'wind_direction_300hPa']):
+                u_sfc, v_sfc = wind_to_uv(data['wind_speed_10m'][i] * KMH_TO_KT, data['wind_direction_10m'][i])
+                u_925, v_925 = wind_to_uv(data['wind_speed_925hPa'][i] * KMH_TO_KT, data['wind_direction_925hPa'][i])
+                u_700, v_700 = wind_to_uv(data['wind_speed_700hPa'][i] * KMH_TO_KT, data['wind_direction_700hPa'][i])
+                u_300, v_300 = wind_to_uv(data['wind_speed_300hPa'][i] * KMH_TO_KT, data['wind_direction_300hPa'][i])
 
-    # =====================
-    # Convective Mode
-    # =====================
+                shear_01.append(math.sqrt((u_925 - u_sfc)**2 + (v_925 - v_sfc)**2))
+                shear_03.append(math.sqrt((u_700 - u_sfc)**2 + (v_700 - v_sfc)**2))
+                deep_shear.append(math.sqrt((u_300 - u_sfc)**2 + (v_300 - v_sfc)**2))
 
-    mode = "None"
-    if instability_ok:
-        if avg_s06 >= 45 and avg_s01 >= 15:
-            mode = "Discrete Supercells"
-        elif avg_s03 >= 30:
-            mode = "Organized Linear / QLCS"
-        elif avg_s06 >= 30:
-            mode = "Multicellular Clusters"
+        avg_shear_01 = sum(shear_01) / len(shear_01) if shear_01 else 0
+        avg_shear_03 = sum(shear_03) / len(shear_03) if shear_03 else 0
+        avg_deep_shear = sum(deep_shear) / len(deep_shear) if deep_shear else 0
+
+        
+
+        # ===== RISK SCORE & SPC ALIGN =====
+        score = 0
+
+        instability_ok = (max_cape >= 500) and (avg_li <= 2)
+
+        if instability_ok:
+            if max_cape >= 500: score += 1
+            if max_cape >= 1500: score += 2
+            if max_cape >= 3000: score += 2
+
+            if avg_shear_03 >= 25: score += 1
+            if avg_deep_shear >= 35: score += 1
+            if avg_deep_shear >= 45: score += 2
+
+           
+
+            if total_precip >= 0.5: score += 1
+            if total_precip >= 1.5: score += 1
         else:
-            mode = "Pulse / Disorganized"
+            score = 0  # No risk if instability lacking
+        # Map score to risk level
+        risk_level = "NONE"
+        if score >= 2: risk_level = "MRGL"
+        if score >= 5: risk_level = "SLGT"
+        if score >= 8: risk_level = "ENH"
+        if score >= 11: risk_level = "MDT"
+        if score >= 14: risk_level = "HIGH"
 
-    # =====================
-    # Risk Level
-    # =====================
+        spc_current = get_spc_outlook()
 
-    risk = "NONE"
-    if instability_ok:
-        if max_cape >= 2000 and avg_s06 >= 50:
-            risk = "MDT"
-        elif max_cape >= 1500 and avg_s06 >= 40:
-            risk = "ENH"
-        elif max_cape >= 800 and avg_s06 >= 30:
-            risk = "SLGT"
-        else:
-            risk = "MRGL"
+        #  Fail modes & likely outcome
+        fail_modes = []
+        if max_cape < 500: fail_modes.append("Lack of instability - watch for warming/moistening")
+        if avg_rh < 50: fail_modes.append("Dry air intrusion - could evaporate precip/storms")
+        if avg_li > 0: fail_modes.append("Capping inversion - monitor for erosion via lift")
+        if avg_deep_shear < 30 and max_cape > 1000: fail_modes.append("Weak shear - storms may pulse/not organize")
+        if total_precip > 2 and max_cape < 1000: fail_modes.append("Heavy rain but no severe - flash flood watch")
 
-    # =====================
-    # Fail Modes
-    # =====================
+        likely_outcome = "No severe weather expected."
+        if risk_level == "MRGL": likely_outcome = "Isolated storms possible; mainly wind/hail."
+        if risk_level == "SLGT": likely_outcome = "Scattered severe storms; wind/hail primary, low tornado risk."
+        if risk_level == "ENH": likely_outcome = "Numerous severe storms; hail/wind, some tornadoes possible."
+        if risk_level == "MDT": likely_outcome = "Widespread severe; large hail, strong tornadoes likely."
+        if risk_level == "HIGH": likely_outcome = "Major outbreak; violent tornadoes, extreme hail/wind."
 
-    fail_modes = []
-    if max_cape < 500:
-        fail_modes.append("Insufficient instability")
-    if avg_rh < 45:
-        fail_modes.append("Dry low-level air")
-    if min_li > 0:
-        fail_modes.append("Strong cap")
-    if avg_s06 < 25 and max_cape > 1000:
-        fail_modes.append("Weak shear → poor organization")
-    if total_qpf > 2 and max_cape < 800:
-        fail_modes.append("Rain-dominant system")
+      
+        if not instability_ok:
+            likely_outcome = "Severe weather unlikely due to insufficient instability."
 
-    return {
-        "risk": risk,
-        "mode": mode,
-        "max_cape": max_cape,
-        "min_li": min_li,
-        "shear01": avg_s01,
-        "shear03": avg_s03,
-        "shear06": avg_s06,
-        "rh": avg_rh,
-        "qpf": total_qpf,
-        "alerts": alerts,
-        "fail_modes": fail_modes,
-    }
+        # ===== UI OUTPUT =====
+        result_container.clear()
+        with result_container:
+            ui.label(f"Analysis Refreshed: {datetime.now().strftime('%Y-%m-%d %I:%M %p EST')}").classes("text-sm text-gray-500 mb-2")
+            color = "text-green-500" if risk_level == "NONE" else "text-yellow-500"
+            if risk_level in ["SLGT", "ENH"]: color = "text-orange-500"
+            if risk_level in ["MDT", "HIGH"]: color = "text-red-600"
 
-# =====================
-# UI
-# =====================
+            ui.label(f"Risk Level: {risk_level} (Score {score})").classes(f"text-2xl font-bold {color}")
+            ui.label(f"SPC Current Day 1: {spc_current}").classes("text-lg text-blue-500")
+            ui.label(
+                f"**Next 24h Summary**"
+            ).classes("text-lg font-bold mt-2")
+            
+            ui.label(
+                f"Instability: Max CAPE {max_cape:.0f} J/kg | Avg LI {avg_li:.1f}"
+            ).classes("text-base")
 
-ui.label("Severe Weather Forecast Hub").classes("text-4xl font-bold text-center mt-4")
-ui.label("Ingredients-based mesoscale guidance (experimental)").classes("text-center mb-6")
+            ui.label(
+                f"Low-Level Shear: 0-1km {avg_shear_01:.0f} kt | 0-3km {avg_shear_03:.0f} kt"
+            ).classes("text-base")
+
+            
+
+            ui.label(
+                f"Threats & Moisture: Precip {total_precip:.1f} in | Avg RH {avg_rh:.0f}%"
+            ).classes("text-base")
+
+            ui.label("").classes("mb-4 border-b border-gray-600")
+
+            ui.label("Most Likely Outcome:").classes("text-xl font-bold")
+            ui.label(likely_outcome).classes("text-md")
+
+            if fail_modes:
+                ui.label("Possible Fail Modes:").classes("text-xl font-bold text-yellow-600")
+                for fm in fail_modes:
+                    ui.label(f"- {fm}")
+
+            if alerts:
+                ui.label(f"{len(alerts)} higher-risk hours:").classes("text-xl text-red-600")
+                for a in alerts:
+                    ui.label(a)
+            else:
+                ui.label("No strong severe ingredients detected.").classes("text-green-600")
+
+    except Exception as e:
+        result_container.clear()
+        ui.label(f"Error: {e}").classes("text-red-600")
+
+# ===== UI =====
+ui.label("Severe Weather Forecast Hub").classes("text-4xl font-bold text-center mt-4")  # Updated title
+ui.label("Powered by Open-Meteo & SPC").classes("text-center mb-6")
 
 with ui.card().classes("w-96 mx-auto p-6"):
-    lat_input = ui.number(label="Latitude", value=LAT)
-    lon_input = ui.number(label="Longitude", value=LON)
+    ui.label("Location (Lat / Lon)")
+    lat_input = ui.number(value=LAT, label="Latitude")
+    lon_input = ui.number(value=LON, label="Longitude")
 
     def update_location():
         global LAT, LON
-        LAT, LON = lat_input.value, lon_input.value
-        ui.notify("Location updated")
+        LAT = lat_input.value
+        LON = lon_input.value
+        ui.notify(f"Location updated to {LAT}, {LON}")
 
     ui.button("Update Location", on_click=update_location)
 
+ui.button("ANALYZE NOW", on_click=fetch_and_analyze).classes("mx-auto mt-6")
 result_container = ui.card().classes("w-full max-w-4xl mx-auto mt-8 p-6")
 
-def run_analysis():
-    result_container.clear()
-    try:
-        data = fetch_open_meteo(LAT, LON)
-        r = analyze(data)
-
-        with result_container:
-            ui.label(f"Updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}").classes("text-sm")
-            ui.label(f"Risk Level: {r['risk']}").classes("text-2xl font-bold")
-            ui.label(f"Dominant Mode: {r['mode']}").classes("text-lg")
-
-            ui.separator()
-
-            ui.label(f"Max CAPE: {r['max_cape']:.0f} J/kg | Min LI: {r['min_li']:.1f}")
-            ui.label(f"Shear (kt): 0–1km {r['shear01']:.0f} | 0–3km {r['shear03']:.0f} | 0–6km {r['shear06']:.0f}")
-            ui.label(f"Moisture: RH {r['rh']:.0f}% | QPF {r['qpf']:.1f}\"")
-
-            if r["fail_modes"]:
-                ui.label("Fail Modes:").classes("text-yellow-500 font-bold")
-                for f in r["fail_modes"]:
-                    ui.label(f"- {f}")
-
-            if r["alerts"]:
-                ui.label("Higher-risk hours:").classes("text-red-500 font-bold")
-                for a in r["alerts"]:
-                    ui.label(a)
-
-    except Exception as e:
-        ui.label(str(e)).classes("text-red-600")
-
-ui.button("ANALYZE", on_click=run_analysis).classes("mx-auto mt-6")
-
-ui.run(host="0.0.0.0", port=7860, dark=True)
+ui.run(
+    host='0.0.0.0',          
+    port=7860,               
+    dark=True,
+    reload=False,            
+    title="MD Severe Weather Hub",
+)
