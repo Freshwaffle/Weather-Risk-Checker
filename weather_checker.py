@@ -200,7 +200,7 @@ def fetch_and_analyze():
         # ===== UI OUTPUT =====
         result_container.clear()
         with result_container:
-            ui.label(f"Analysis Refreshed: {datetime.now().strftime('%Y-%m-%d %I:%M %p EST')}").classes("text-sm text-gray-500 mb-2")
+            ui.label(f"Analysis Refreshed: {datetime.now().strftime('%Y-%m-%d %I:%M %p UCT')}").classes("text-sm text-gray-500 mb-2")
             color = "text-green-500" if risk_level == "NONE" else "text-yellow-500"
             if risk_level in ["SLGT", "ENH"]: color = "text-orange-500"
             if risk_level in ["MDT", "HIGH"]: color = "text-red-600"
