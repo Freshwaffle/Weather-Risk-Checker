@@ -268,4 +268,10 @@ with ui.card().classes("w-96 mx-auto p-6"):
 ui.button("ANALYZE NOW", on_click=fetch_and_analyze).classes("mx-auto mt-6")
 result_container = ui.card().classes("w-full max-w-4xl mx-auto mt-8 p-6")
 
-ui.run(title="MD Severe Weather Hub", dark=True)
+ui.run(
+    host='0.0.0.0',          
+    port=7860,               
+    dark=True,
+    reload=False,            
+    title="MD Severe Weather Hub",
+)
