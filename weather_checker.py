@@ -208,11 +208,24 @@ def fetch_and_analyze():
             ui.label(f"Risk Level: {risk_level} (Score {score})").classes(f"text-2xl font-bold {color}")
             ui.label(f"SPC Current Day 1: {spc_current}").classes("text-lg text-blue-500")
             ui.label(
-                f"Next 24h — Max CAPE: {max_cape:.0f} J/kg | Avg LI: {avg_li:.1f} | "
-                f"Avg 0-1km Shear: {avg_shear_01:.1f} kt | Avg 0-3km Shear: {avg_shear_03:.1f} kt | "
-                f"Avg Deep Shear: {avg_deep_shear:.1f} kt | Avg SRH: {srh_display} | "
-                f"SCP: {scp:.1f} | STP: {stp:.1f} | Total Precip: {total_precip:.1f} in | Avg RH: {avg_rh:.0f}%"
-            ).classes("text-lg mb-4")
+                f"**Next 24h Summary**"
+            ).classes("text-lg font-bold mt-2")
+            
+            ui.label(
+                f"Instability: Max CAPE {max_cape:.0f} J/kg | Avg LI {avg_li:.1f}"
+            ).classes("text-base")
+
+            ui.label(
+                f"Low-Level Shear: 0-1km {avg_shear_01:.0f} kt | 0-3km {avg_shear_03:.0f} kt"
+            ).classes("text-base")
+
+            ui.label(
+                f"Deep Shear & Vorticity: 0-6km {avg_deep_shear:.1f} kt | Avg SRH {srh_display}"
+            ).classes("text-base")
+
+            ui.label(
+                f"Threats & Moisture: SCP {scp:.1f} | STP {stp:.1f} | Precip {total_precip:.1f} in | Avg RH {avg_rh:.0f}%"
+            ).classes("text-base")
 
             ui.label("Most Likely Outcome:").classes("text-xl font-bold")
             ui.label(likely_outcome).classes("text-md")
