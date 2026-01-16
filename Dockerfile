@@ -1,12 +1,12 @@
 FROM zauberzeug/nicegui:latest
 
-COPY . /app/
 WORKDIR /app
 
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-RUN pip install --no-cache-dir -r requirements.txt || true
+COPY . .
 
 EXPOSE 7860
 
-CMD ["python3", "weather_checker.py"]  
-# commit to trigger HF build
+CMD ["python", "weather_checker.py"]
