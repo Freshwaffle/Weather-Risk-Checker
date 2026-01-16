@@ -5,7 +5,7 @@ A personal severe weather ingredients checker and risk estimator for Maryland (a
 This tool analyzes forecast data to identify key severe thunderstorm ingredients (CAPE, shear, SRH, precipitation) and estimates risk levels aligned with SPC categories (NONE → HIGH). It includes fail modes and likely outcomes to explain why severe weather might **not** happen, even with strong shear.
 
 Designed for educational and personal use by an aspiring meteorologist. Not an official forecast, always check SPC/NWS for real decisions.
-![DEMO](https://imgur.com/a/D7HJ9xa)
+![DEMO](https://i.imgur.com/h3qtbYy.png)
 ## Features
 - Real-time 24–48 hour forecast analysis from Open-Meteo
 - Calculates:
