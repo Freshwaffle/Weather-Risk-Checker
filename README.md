@@ -20,7 +20,7 @@ Designed for educational and personal use by an aspiring meteorologist. Not an o
 
 ## Live Demo
 Try it here:  
-https://huggingface.co/spaces/Freshwaffle23426/Weather_Risk_Checker
+[https://huggingface.co/spaces/Freshwaffle23426/Weather_Risk_Checker](https://huggingface.co/spaces/Freshwaffle23426/Weather-Risk-Checker)
 
 ## How to Run Locally
 1. Clone the repo:
