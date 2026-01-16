@@ -122,6 +122,7 @@ def fetch_and_analyze():
 
         shear_01, shear_03, deep_shear = [], [], []
         avg_srh = sum(srh_vals[:24]) / len(srh_vals[:24]) if srh_vals else 0
+        srh_display = f"{abs(avg_srh):.0f} m²/s² ({'+' if avg_srh >= 0 else '-'} sign)"
 
         for i in range(24):
             if all(data.get(k)[i] is not None for k in ['wind_direction_10m', 'wind_direction_925hPa', 'wind_direction_700hPa', 'wind_direction_300hPa']):
@@ -149,8 +150,8 @@ def fetch_and_analyze():
 
         if instability_ok:
             if max_cape >= 500: score += 1
-            if max_cape >= 1000: score += 2
-            if max_cape >= 2000: score += 2
+            if max_cape >= 1500: score += 2
+            if max_cape >= 3000: score += 2
 
             if avg_shear_03 >= 25: score += 1
             if avg_deep_shear >= 35: score += 1
@@ -198,6 +199,7 @@ def fetch_and_analyze():
 
         # ===== UI OUTPUT =====
         result_container.clear()
+        ui.label(f"Analysis Refreshed: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}").classes("text-sm text-gray-500 mb-2")
         with result_container:
             color = "text-green-500" if risk_level == "NONE" else "text-yellow-500"
             if risk_level in ["SLGT", "ENH"]: color = "text-orange-500"
@@ -208,7 +210,7 @@ def fetch_and_analyze():
             ui.label(
                 f"Next 24h — Max CAPE: {max_cape:.0f} J/kg | Avg LI: {avg_li:.1f} | "
                 f"Avg 0-1km Shear: {avg_shear_01:.1f} kt | Avg 0-3km Shear: {avg_shear_03:.1f} kt | "
-                f"Avg Deep Shear: {avg_deep_shear:.1f} kt | Avg SRH: {avg_srh:.0f} m²/s² | "
+                f"Avg Deep Shear: {avg_deep_shear:.1f} kt | Avg SRH: {srh_display} | "
                 f"SCP: {scp:.1f} | STP: {stp:.1f} | Total Precip: {total_precip:.1f} in | Avg RH: {avg_rh:.0f}%"
             ).classes("text-lg mb-4")
 
