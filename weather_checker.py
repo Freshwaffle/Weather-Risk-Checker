@@ -227,6 +227,8 @@ def fetch_and_analyze():
                 f"Threats & Moisture: SCP {scp:.1f} | STP {stp:.1f} | Precip {total_precip:.1f} in | Avg RH {avg_rh:.0f}%"
             ).classes("text-base")
 
+            ui.label("").classes("mb-4 border-b border-gray-600")
+
             ui.label("Most Likely Outcome:").classes("text-xl font-bold")
             ui.label(likely_outcome).classes("text-md")
 
