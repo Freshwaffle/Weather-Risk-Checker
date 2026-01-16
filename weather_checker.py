@@ -138,25 +138,35 @@ def fetch_and_analyze():
         avg_shear_03 = sum(shear_03) / len(shear_03) if shear_03 else 0
         avg_deep_shear = sum(deep_shear) / len(deep_shear) if deep_shear else 0
 
-        # New B: Calculate composites (proxies; full calcs need more data)
+        # Calculate composites (proxies; full calcs need more data)
         scp = (max_cape / 1000) * (avg_deep_shear / 50) * (avg_srh / 50) if avg_srh > 0 else 0  # Supercell Composite
         stp = (max_cape / 1500) * (avg_shear_01 / 20) * (avg_srh / 150) * (2000 - 1000) / 1500  # Sig Tornado Param (LCL proxy 1000m)
 
-        # ===== RISK SCORE & SPC ALIGN (E) =====
+        # ===== RISK SCORE & SPC ALIGN =====
         score = 0
-        if max_cape >= 500: score += 1
-        if max_cape >= 1500: score += 2
-        if max_cape >= 2500: score += 2
-        if avg_shear_03 >= 25: score += 1
-        if avg_deep_shear >= 35: score += 1
-        if avg_deep_shear >= 45: score += 2
-        if avg_srh >= 100: score += 1
-        if avg_srh >= 250: score += 2
-        if total_precip >= 0.5: score += 1
-        if total_precip >= 1.5: score += 1
-        if scp >= 3: score += 2  # Supercell potential
-        if stp >= 1: score += 2  # Tornado potential
 
+        instability_ok = (max_cape >= 500) and (avg_li <= 2)
+
+        if instability_ok:
+            if max_cape >= 500: score += 1
+            if max_cape >= 1000: score += 2
+            if max_cape >= 2000: score += 2
+
+            if avg_shear_03 >= 25: score += 1
+            if avg_deep_shear >= 35: score += 1
+            if avg_deep_shear >= 45: score += 2
+
+            if avg_srh >= 100: score += 1
+            if avg_srh >= 250: score += 2
+
+            if scp >= 3: score += 2
+            if stp >= 1: score += 2
+
+            if total_precip >= 0.5: score += 1
+            if total_precip >= 1.5: score += 1
+        else:
+            score = 0  # No risk if instability lacking
+        # Map score to risk level
         risk_level = "NONE"
         if score >= 2: risk_level = "MRGL"
         if score >= 5: risk_level = "SLGT"
@@ -166,7 +176,7 @@ def fetch_and_analyze():
 
         spc_current = get_spc_outlook()
 
-        # New C & D: Fail modes & likely outcome
+        #  Fail modes & likely outcome
         fail_modes = []
         if max_cape < 500: fail_modes.append("Lack of instability - watch for warming/moistening")
         if avg_rh < 50: fail_modes.append("Dry air intrusion - could evaporate precip/storms")
@@ -183,6 +193,8 @@ def fetch_and_analyze():
 
         if scp > 5: likely_outcome += " Supercell mode favored."
         if stp > 2: likely_outcome += " Significant tornado potential."
+        if not instability_ok:
+            likely_outcome = "Severe weather unlikely due to insufficient instability."
 
         # ===== UI OUTPUT =====
         result_container.clear()
