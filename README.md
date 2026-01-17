@@ -47,7 +47,7 @@ https://huggingface.co/spaces/Freshwaffle23426/Weather-Risk-Checker
 
 ## Gallery
 
-(https://imgur.com/a/D7HJ9xa)
+![DEMO](https://imgur.com/a/D7HJ9xa)
 
 ---
 
