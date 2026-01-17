@@ -9,6 +9,9 @@ def wind_to_uv(speed_kt, direction_deg):
     v = -speed_kt * math.cos(rad)
     return u, v
 
+# New: Approximate SRH (0-3km) - needs storm motion vector; we'll estimate as right-mover (Bunkers method proxy)
+def calculate_srh(u_sfc, v_sfc, u_700, v_700, storm_u=0, storm_v=0):  # Simple proxy; storm motion ~0 for now
+    return ((u_700 - storm_u) * (v_sfc - storm_v) - (v_700 - storm_v) * (u_sfc - storm_u))  # Units: m2/s2
 
 KMH_TO_KT = 0.539957
 MM_TO_IN = 0.0393701
@@ -53,7 +56,7 @@ def fetch_and_analyze():
         data = response.json()['hourly']
 
         alerts = []
-        
+        srh_vals = []  # New: Track SRH
 
         # ===== HOURLY FLAGS (A: Ingredients) =====
         for i in range(len(data['time'])):
@@ -80,7 +83,7 @@ def fetch_and_analyze():
             shear_03_inst = 0
             shear_01_inst = 0  # New: 0-1km shear
             deep_shear_inst = 0
-            
+            srh_inst = 0
             if all(x is not None for x in [dir_sfc, dir_925, dir_700, dir_300]):
                 u_sfc, v_sfc = wind_to_uv(spd_sfc, dir_sfc)
                 u_925, v_925 = wind_to_uv(spd_925, dir_925)
@@ -90,7 +93,8 @@ def fetch_and_analyze():
                 shear_01_inst = math.sqrt((u_925 - u_sfc)**2 + (v_925 - v_sfc)**2)
                 shear_03_inst = math.sqrt((u_700 - u_sfc)**2 + (v_700 - v_sfc)**2)
                 deep_shear_inst = math.sqrt((u_300 - u_sfc)**2 + (v_300 - v_sfc)**2)
-                
+                srh_inst = calculate_srh(u_sfc, v_sfc, u_700, v_700)  # Proxy SRH
+                srh_vals.append(srh_inst)
 
             precip = (data['precipitation'][i] or 0) * MM_TO_IN
 
@@ -101,6 +105,7 @@ def fetch_and_analyze():
             if shear_01_inst >= 15: flags.append(f"Strong 0-1km Shear ({shear_01_inst:.0f} kt)")
             if shear_03_inst >= 30: flags.append(f"Strong 0-3km Shear ({shear_03_inst:.0f} kt)")
             if deep_shear_inst >= 40: flags.append(f"Strong Deep Shear ({deep_shear_inst:.0f} kt)")
+            if srh_inst >= 150: flags.append(f"High SRH ({srh_inst:.0f} m²/s²)")
             if precip >= 0.5: flags.append(f"Mod Rain ({precip:.2f} in)")
             if precip >= 1.0: flags.append(f"Heavy Rain ({precip:.2f} in)")
             if rh < 50: flags.append(f"Dry Low-Level ({rh}% RH)")
@@ -115,7 +120,10 @@ def fetch_and_analyze():
         total_precip = sum((p or 0) * MM_TO_IN for p in data['precipitation'][:24])
         avg_rh = sum([r for r in data['relative_humidity_2m'][:24] if r is not None]) / 24 or 0
 
-        
+        shear_01, shear_03, deep_shear = [], [], []
+        avg_srh = sum(srh_vals[:24]) / len(srh_vals[:24]) if srh_vals else 0
+        srh_display = f"{abs(avg_srh):.0f} m²/s² ({'+' if avg_srh >= 0 else '-'}  {'cyclonic' if avg_srh >= 0 else 'anticyclonic'})"
+
         for i in range(24):
             if all(data.get(k)[i] is not None for k in ['wind_direction_10m', 'wind_direction_925hPa', 'wind_direction_700hPa', 'wind_direction_300hPa']):
                 u_sfc, v_sfc = wind_to_uv(data['wind_speed_10m'][i] * KMH_TO_KT, data['wind_direction_10m'][i])
@@ -131,7 +139,9 @@ def fetch_and_analyze():
         avg_shear_03 = sum(shear_03) / len(shear_03) if shear_03 else 0
         avg_deep_shear = sum(deep_shear) / len(deep_shear) if deep_shear else 0
 
-        
+        # Calculate composites (proxies; full calcs need more data)
+        scp = (max_cape / 1000) * (avg_deep_shear / 50) * (avg_srh / 50) if avg_srh > 0 else 0  # Supercell Composite
+        stp = (max_cape / 1500) * (avg_shear_01 / 20) * (avg_srh / 150) * (2000 - 1000) / 1500  # Sig Tornado Param (LCL proxy 1000m)
 
         # ===== RISK SCORE & SPC ALIGN =====
         score = 0
@@ -147,7 +157,11 @@ def fetch_and_analyze():
             if avg_deep_shear >= 35: score += 1
             if avg_deep_shear >= 45: score += 2
 
-           
+            if avg_srh >= 100: score += 1
+            if avg_srh >= 250: score += 2
+
+            if scp >= 3: score += 2
+            if stp >= 1: score += 2
 
             if total_precip >= 0.5: score += 1
             if total_precip >= 1.5: score += 1
@@ -178,14 +192,15 @@ def fetch_and_analyze():
         if risk_level == "MDT": likely_outcome = "Widespread severe; large hail, strong tornadoes likely."
         if risk_level == "HIGH": likely_outcome = "Major outbreak; violent tornadoes, extreme hail/wind."
 
-      
+        if scp > 5: likely_outcome += " Supercell mode favored."
+        if stp > 2: likely_outcome += " Significant tornado potential."
         if not instability_ok:
             likely_outcome = "Severe weather unlikely due to insufficient instability."
 
         # ===== UI OUTPUT =====
         result_container.clear()
         with result_container:
-            ui.label(f"Analysis Refreshed: {datetime.now().strftime('%Y-%m-%d %I:%M %p EST')}").classes("text-sm text-gray-500 mb-2")
+            ui.label(f"Analysis Refreshed: {datetime.now().strftime('%Y-%m-%d %I:%M %p UTC')}").classes("text-sm text-gray-500 mb-2")
             color = "text-green-500" if risk_level == "NONE" else "text-yellow-500"
             if risk_level in ["SLGT", "ENH"]: color = "text-orange-500"
             if risk_level in ["MDT", "HIGH"]: color = "text-red-600"
@@ -204,10 +219,12 @@ def fetch_and_analyze():
                 f"Low-Level Shear: 0-1km {avg_shear_01:.0f} kt | 0-3km {avg_shear_03:.0f} kt"
             ).classes("text-base")
 
-            
+            ui.label(
+                f"Deep Shear & Vorticity: 0-6km {avg_deep_shear:.1f} kt | Avg SRH {srh_display}"
+            ).classes("text-base")
 
             ui.label(
-                f"Threats & Moisture: Precip {total_precip:.1f} in | Avg RH {avg_rh:.0f}%"
+                f"Threats & Moisture: SCP {scp:.1f} | STP {stp:.1f} | Precip {total_precip:.1f} in | Avg RH {avg_rh:.0f}%"
             ).classes("text-base")
 
             ui.label("").classes("mb-4 border-b border-gray-600")
