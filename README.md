@@ -1,5 +1,4 @@
 # Severe Weather Environment Diagnostics Hub
-## Possibly Moving This To A Legacy Version And Making This A Much Bigger Project
 
 An ingredient-based severe weather environment analysis and pattern-recognition tool built with NiceGUI and powered by Open-Meteo forecast data.
 
