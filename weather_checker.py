@@ -122,8 +122,7 @@ def fetch_and_analyze():
 
         shear_01, shear_03, deep_shear = [], [], []
         avg_srh = sum(srh_vals[:24]) / len(srh_vals[:24]) if srh_vals else 0
-        srh_display = f"{abs(avg_srh):.0f} m²/s² ({'+' if avg_srh >= 0 else '-'}  {'cyclonic' if avg_srh >= 0 else 'anticyclonic'})"
-
+        srh_display =f"{avg_srh:.0f} m²/s²"
         for i in range(24):
             if all(data.get(k)[i] is not None for k in ['wind_direction_10m', 'wind_direction_925hPa', 'wind_direction_700hPa', 'wind_direction_300hPa']):
                 u_sfc, v_sfc = wind_to_uv(data['wind_speed_10m'][i] * KMH_TO_KT, data['wind_direction_10m'][i])
