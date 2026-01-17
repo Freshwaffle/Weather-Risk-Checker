@@ -45,6 +45,12 @@ https://huggingface.co/spaces/Freshwaffle23426/Weather-Risk-Checker
 
 ---
 
+## Gallery
+
+(https://imgur.com/a/D7HJ9xa)
+
+---
+
 ## Data Source
 
 Forecast data is provided by **Open-Meteo**, which aggregates multiple numerical weather prediction models. Parameter availability and vertical resolution are limited; all kinematic and composite quantities are therefore **approximations** and treated accordingly.
