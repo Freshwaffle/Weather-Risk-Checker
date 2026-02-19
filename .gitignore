@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.env
+herbie_cache/    
+/tmp/
+*.grib2
+*.grib
